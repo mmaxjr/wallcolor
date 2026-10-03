@@ -13,7 +13,6 @@ class TfliteSegmentationModel implements SegmentationModel {
 
   final String assetPath;
   Interpreter? _interpreter;
-  IsolateInterpreter? _isolateInterpreter;
   int _inputWidth = 256;
   int _inputHeight = 256;
   Uint8List? _outputBuffer;
@@ -28,17 +27,12 @@ class TfliteSegmentationModel implements SegmentationModel {
   @override
   Future<void> load() async {
     try {
-      final options = InterpreterOptions()..threads = 2;
-      try {
-        options.addDelegate(GpuDelegateV2());
-        _interpreter = await Interpreter.fromAsset(assetPath, options: options);
-      } catch (_) {
-        options.delete();
-        _interpreter = await Interpreter.fromAsset(
-          assetPath,
-          options: InterpreterOptions()..threads = 2,
-        );
-      }
+      // Keep inference on the calling isolate. IsolateInterpreter in
+      // tflite_flutter 0.12.1 does not forward native inference exceptions;
+      // its worker exits before sending `idle`, leaving every caller pending.
+      // GPU delegate is also unsafe to use from that worker isolate.
+      final options = InterpreterOptions()..threads = 4;
+      _interpreter = await Interpreter.fromAsset(assetPath, options: options);
       final inputShape = _interpreter!.getInputTensor(0).shape;
       _inputType = _interpreter!.getInputTensor(0).type;
       if (inputShape.length != 4 || inputShape[0] != 1 || inputShape[3] != 3) {
@@ -53,12 +47,7 @@ class TfliteSegmentationModel implements SegmentationModel {
       }
       _inputHeight = inputShape[1];
       _inputWidth = inputShape[2];
-      _isolateInterpreter = await IsolateInterpreter.create(
-        address: _interpreter!.address,
-      );
     } catch (error) {
-      await _isolateInterpreter?.close();
-      _isolateInterpreter = null;
       _interpreter?.close();
       _interpreter = null;
       throw StateError(
@@ -74,8 +63,7 @@ class TfliteSegmentationModel implements SegmentationModel {
     required int height,
   }) async {
     final interpreter = _interpreter;
-    final worker = _isolateInterpreter;
-    if (interpreter == null || worker == null) {
+    if (interpreter == null) {
       throw StateError('O modelo ainda não foi carregado.');
     }
     if (width != inputWidth ||
@@ -122,10 +110,10 @@ class TfliteSegmentationModel implements SegmentationModel {
       final Uint8List classMap;
       if (outputType == TensorType.uint8) {
         classMap = Uint8List(mapLength);
-        await worker.run(input, classMap.buffer);
+        interpreter.run(input, classMap);
       } else {
         final rawClassMap = Uint8List(mapLength * 4);
-        await worker.run(input, rawClassMap.buffer);
+        interpreter.run(input, rawClassMap);
         classMap = TfliteTensorCodec.int32ClassMap(
           rawClassMap,
           pixels: mapLength,
@@ -152,7 +140,7 @@ class TfliteSegmentationModel implements SegmentationModel {
         ? outputBuffer
         : Uint8List(outputLength * 4);
     _outputBuffer = rawOutput;
-    await worker.run(input, rawOutput.buffer);
+    interpreter.run(input, rawOutput);
     return SegmentationOutput(
       width: outputShape[2],
       height: outputShape[1],
@@ -167,8 +155,6 @@ class TfliteSegmentationModel implements SegmentationModel {
 
   @override
   Future<void> close() async {
-    await _isolateInterpreter?.close();
-    _isolateInterpreter = null;
     _interpreter?.close();
     _interpreter = null;
     _outputBuffer = null;
