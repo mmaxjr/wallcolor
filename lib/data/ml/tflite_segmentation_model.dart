@@ -37,12 +37,18 @@ class TfliteSegmentationModel implements SegmentationModel {
   @override
   Future<void> load() async {
     try {
-      final rootToken = RootIsolateToken.instance!;
+      final modelData = await rootBundle.load(assetPath);
+      final modelBytes = TransferableTypedData.fromList([
+        modelData.buffer.asUint8List(
+          modelData.offsetInBytes,
+          modelData.lengthInBytes,
+        ),
+      ]);
       _ready = Completer<SendPort>();
       _responseSubscription = _responses.listen(_handleResponse);
       _worker = await Isolate.spawn(
         _modelWorker,
-        _WorkerInit(_responses.sendPort, rootToken, assetPath),
+        _WorkerInit(_responses.sendPort, modelBytes),
         errorsAreFatal: false,
       );
       _sendPort = await _ready!.future.timeout(const Duration(seconds: 30));
@@ -158,10 +164,9 @@ class TfliteSegmentationModel implements SegmentationModel {
 }
 
 class _WorkerInit {
-  const _WorkerInit(this.replyPort, this.rootToken, this.assetPath);
+  const _WorkerInit(this.replyPort, this.modelBytes);
   final SendPort replyPort;
-  final RootIsolateToken rootToken;
-  final String assetPath;
+  final TransferableTypedData modelBytes;
 }
 
 class _InferenceRequest {
@@ -177,20 +182,17 @@ class _InferenceRequest {
 
 @pragma('vm:entry-point')
 Future<void> _modelWorker(_WorkerInit init) async {
-  BackgroundIsolateBinaryMessenger.ensureInitialized(init.rootToken);
   final commands = ReceivePort();
   Interpreter? interpreter;
   GpuDelegateV2? gpuDelegate;
   try {
+    final modelBytes = init.modelBytes.materialize().asUint8List();
     if (Platform.isAndroid) {
       final gpuOptions = InterpreterOptions()..threads = 4;
       try {
         gpuDelegate = GpuDelegateV2();
         gpuOptions.addDelegate(gpuDelegate);
-        interpreter = await Interpreter.fromAsset(
-          init.assetPath,
-          options: gpuOptions,
-        );
+        interpreter = Interpreter.fromBuffer(modelBytes, options: gpuOptions);
         gpuOptions.delete();
       } catch (_) {
         gpuOptions.delete();
@@ -200,10 +202,7 @@ Future<void> _modelWorker(_WorkerInit init) async {
     }
     if (interpreter == null) {
       final cpuOptions = InterpreterOptions()..threads = 4;
-      interpreter = await Interpreter.fromAsset(
-        init.assetPath,
-        options: cpuOptions,
-      );
+      interpreter = Interpreter.fromBuffer(modelBytes, options: cpuOptions);
       cpuOptions.delete();
     }
     final input = interpreter.getInputTensor(0);
@@ -241,8 +240,8 @@ Future<void> _modelWorker(_WorkerInit init) async {
             gpuDelegate!.delete();
             gpuDelegate = null;
             final cpuOptions = InterpreterOptions()..threads = 4;
-            interpreter = await Interpreter.fromAsset(
-              init.assetPath,
+            interpreter = Interpreter.fromBuffer(
+              modelBytes,
               options: cpuOptions,
             );
             cpuOptions.delete();
