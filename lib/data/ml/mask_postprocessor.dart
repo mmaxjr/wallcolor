@@ -27,6 +27,7 @@ class MaskPostprocessor {
       throw ArgumentError('Os logits não correspondem às dimensões e classes.');
     }
     final mask = Float32List(width * height);
+    final temporalValues = Float32List(width * height);
     for (var pixel = 0; pixel < width * height; pixel++) {
       final bestClass = classMap == null
           ? () {
@@ -42,12 +43,18 @@ class MaskPostprocessor {
               return best;
             }()
           : classMap[pixel];
-      final current = bestClass == wallClassIndex ? 1.0 : 0.0;
-      mask[pixel] = _previous == null || _previous!.length != mask.length
-          ? current
-          : smoothing * _previous![pixel] + (1 - smoothing) * current;
+      final current = bestClass == wallClassIndex;
+      final previous = _previous;
+      final temporalScore = previous == null || previous.length != mask.length
+          ? (current ? 1.0 : 0.0)
+          : smoothing * previous[pixel] +
+                (1 - smoothing) * (current ? 1.0 : 0.0);
+      // Threshold the temporal score so antialiasing does not expand walls
+      // into nearby ceiling or floor pixels.
+      temporalValues[pixel] = temporalScore;
+      mask[pixel] = temporalScore >= 0.5 ? 1 : 0;
     }
-    _previous = Float32List.fromList(mask);
+    _previous = temporalValues;
     return WallMask(width: width, height: height, values: mask);
   }
 

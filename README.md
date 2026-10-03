@@ -49,6 +49,6 @@ Para configurar variáveis localmente, copie `.env.example` para `assets/config/
 
 ## Desempenho e limitações
 
-Não foram medidos FPS ou latência ainda. O alvo do projeto é inferência a 10–15 fps e preview a 30 fps em aparelho intermediário, mas isso precisa ser validado em dispositivo físico. O pré-processamento amostra YUV420 diretamente na resolução de entrada para evitar um frame RGB intermediário; se isso virar gargalo, avalie Kotlin por platform channel. Bordas de teto, móveis e iluminação ruim também exigirão ajuste do modelo e da máscara.
+Não foram medidos FPS ou latência ainda. O alvo do projeto é inferência a 10–15 fps e preview a 30 fps em aparelho intermediário, mas isso precisa ser validado em dispositivo físico. O interpretador roda em um isolate dedicado, tenta GPU no Android e volta para CPU se necessário. O pré-processamento amostra YUV420 diretamente na resolução de entrada; se isso virar gargalo, mova-o para o worker Kotlin. Bordas de teto, móveis e iluminação ruim também exigirão ajuste do modelo e da máscara.
 
 O processamento de imagem planejado é local, sem backend. Configurações locais podem ser registradas em `.env` usando `.env.example` como referência; `.env` e pesos do modelo são ignorados pelo Git.

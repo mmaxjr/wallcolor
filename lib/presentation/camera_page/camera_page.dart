@@ -136,7 +136,6 @@ class _CameraPageState extends ConsumerState<CameraPage>
         if (session.wallMask != null)
           Positioned.fill(
             child: MaskPaintOverlay(
-              cameraPreview: CameraPreview(camera),
               mask: session.wallMask!,
               paintColor: session.selectedPaintColor,
               debugMask: session.debugMask,

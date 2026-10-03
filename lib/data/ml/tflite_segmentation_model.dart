@@ -1,5 +1,9 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../../domain/entities/segmentation_output.dart';
@@ -12,10 +16,16 @@ class TfliteSegmentationModel implements SegmentationModel {
   });
 
   final String assetPath;
-  Interpreter? _interpreter;
+  Isolate? _worker;
+  SendPort? _sendPort;
+  final ReceivePort _responses = ReceivePort();
+  StreamSubscription<Object?>? _responseSubscription;
+  final Map<int, Completer<Object?>> _pending = {};
+  int _requestId = 0;
+  Completer<SendPort>? _ready;
+  Completer<void>? _closed;
   int _inputWidth = 256;
   int _inputHeight = 256;
-  Uint8List? _outputBuffer;
   TensorType? _inputType;
 
   @override
@@ -27,29 +37,25 @@ class TfliteSegmentationModel implements SegmentationModel {
   @override
   Future<void> load() async {
     try {
-      // Keep inference on the calling isolate. IsolateInterpreter in
-      // tflite_flutter 0.12.1 does not forward native inference exceptions;
-      // its worker exits before sending `idle`, leaving every caller pending.
-      // GPU delegate is also unsafe to use from that worker isolate.
-      final options = InterpreterOptions()..threads = 4;
-      _interpreter = await Interpreter.fromAsset(assetPath, options: options);
-      final inputShape = _interpreter!.getInputTensor(0).shape;
-      _inputType = _interpreter!.getInputTensor(0).type;
-      if (inputShape.length != 4 || inputShape[0] != 1 || inputShape[3] != 3) {
-        throw StateError(
-          'Formato de entrada incompatível: $inputShape. Esperado [1, altura, largura, 3].',
-        );
-      }
-      if (_inputType != TensorType.float32 && _inputType != TensorType.uint8) {
-        throw StateError(
-          'O modelo precisa aceitar pixels RGB float32 ou uint8.',
-        );
-      }
-      _inputHeight = inputShape[1];
-      _inputWidth = inputShape[2];
+      final rootToken = RootIsolateToken.instance!;
+      _ready = Completer<SendPort>();
+      _responseSubscription = _responses.listen(_handleResponse);
+      _worker = await Isolate.spawn(
+        _modelWorker,
+        _WorkerInit(_responses.sendPort, rootToken, assetPath),
+        errorsAreFatal: false,
+      );
+      _sendPort = await _ready!.future.timeout(const Duration(seconds: 30));
+      final metadata = await _send<Map<Object?, Object?>>('metadata', null);
+      _inputWidth = metadata['width']! as int;
+      _inputHeight = metadata['height']! as int;
+      _inputType = TensorType.values.byName(metadata['inputType']! as String);
     } catch (error) {
-      _interpreter?.close();
-      _interpreter = null;
+      _worker?.kill(priority: Isolate.immediate);
+      _worker = null;
+      await _responseSubscription?.cancel();
+      _responseSubscription = null;
+      _responses.close();
       throw StateError(
         'Não foi possível carregar $assetPath. Confira se o modelo existe e se os tensores são compatíveis. $error',
       );
@@ -62,8 +68,7 @@ class TfliteSegmentationModel implements SegmentationModel {
     required int width,
     required int height,
   }) async {
-    final interpreter = _interpreter;
-    if (interpreter == null) {
+    if (_sendPort == null) {
       throw StateError('O modelo ainda não foi carregado.');
     }
     if (width != inputWidth ||
@@ -83,81 +88,205 @@ class TfliteSegmentationModel implements SegmentationModel {
         normalizedRgb.lengthInBytes,
       );
     }
-    final outputShape = interpreter.getOutputTensor(0).shape;
-    final outputIsClassMap =
-        (outputShape.length == 3 && outputShape[0] == 1) ||
-        (outputShape.length == 4 && outputShape[0] == 1 && outputShape[3] == 1);
-    final hasBatchAndSpatialShape =
-        outputShape.length == 3 || outputShape.length == 4;
-    if (!hasBatchAndSpatialShape ||
-        outputShape[0] != 1 ||
-        outputShape[1] <= 0 ||
-        outputShape[2] <= 0) {
-      throw StateError(
-        'Formato de saída incompatível: $outputShape. Esperado [1, altura, largura] para mapa de classes ou [1, altura, largura, classes] para logits.',
-      );
-    }
-    final outputType = interpreter.getOutputTensor(0).type;
-    final classes = outputShape.length == 4 ? outputShape[3] : 1;
-    final isDiscreteMap =
-        outputIsClassMap &&
-        (outputType == TensorType.uint8 || outputType == TensorType.int32);
-    if (outputType != TensorType.float32 && !isDiscreteMap) {
-      throw StateError('Tipo de saída incompatível: $outputType $outputShape.');
-    }
-    if (isDiscreteMap) {
-      final mapLength = outputShape[1] * outputShape[2];
-      final Uint8List classMap;
-      if (outputType == TensorType.uint8) {
-        classMap = Uint8List(mapLength);
-        interpreter.run(input, classMap);
-      } else {
-        final rawClassMap = Uint8List(mapLength * 4);
-        interpreter.run(input, rawClassMap);
-        classMap = TfliteTensorCodec.int32ClassMap(
-          rawClassMap,
-          pixels: mapLength,
-        );
-      }
-      final maxClass = classMap.reduce((a, b) => a > b ? a : b);
-      return SegmentationOutput(
-        width: outputShape[2],
-        height: outputShape[1],
-        classes: maxClass + 1,
-        logits: Float32List(0),
-        classMap: classMap,
-      );
-    }
-    final outputLength = outputShape.reduce((a, b) => a * b);
-    if (classes < 2) {
-      throw StateError(
-        'O modelo retornou logits incompatíveis com uma segmentação semântica.',
-      );
-    }
-    final outputBuffer = _outputBuffer;
-    final rawOutput =
-        outputBuffer != null && outputBuffer.length == outputLength * 4
-        ? outputBuffer
-        : Uint8List(outputLength * 4);
-    _outputBuffer = rawOutput;
-    interpreter.run(input, rawOutput);
-    return SegmentationOutput(
-      width: outputShape[2],
-      height: outputShape[1],
-      classes: classes,
-      logits: Float32List.view(
-        rawOutput.buffer,
-        rawOutput.offsetInBytes,
-        outputLength,
-      ),
+    return _send<SegmentationOutput>(
+      'infer',
+      _InferenceRequest(input: input, width: width, height: height),
     );
   }
 
   @override
   Future<void> close() async {
-    _interpreter?.close();
-    _interpreter = null;
-    _outputBuffer = null;
-    _inputType = null;
+    if (_sendPort case final port?) {
+      _closed = Completer<void>();
+      port.send({'type': 'close'});
+      await _closed!.future.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {},
+      );
+    }
+    _worker?.kill(priority: Isolate.immediate);
+    _worker = null;
+    _sendPort = null;
+    await _responseSubscription?.cancel();
+    _responses.close();
+    for (final pending in _pending.values) {
+      if (!pending.isCompleted) {
+        pending.completeError(
+          StateError('O isolate de inferência foi encerrado.'),
+        );
+      }
+    }
+    _pending.clear();
   }
+
+  Future<T> _send<T>(String type, Object? payload) {
+    final id = ++_requestId;
+    final completer = Completer<Object?>();
+    _pending[id] = completer;
+    _sendPort!.send({'type': type, 'id': id, 'payload': payload});
+    return completer.future
+        .timeout(const Duration(seconds: 30))
+        .then((v) => v as T);
+  }
+
+  void _handleResponse(Object? message) {
+    if (message is SendPort) {
+      if (!(_ready?.isCompleted ?? true)) _ready!.complete(message);
+      return;
+    }
+    if (message is! Map) return;
+    final id = message['id'] as int?;
+    if (id == -1 && message['type'] == 'error') {
+      if (!(_ready?.isCompleted ?? true)) {
+        _ready!.completeError(StateError(message['error'] as String));
+      }
+      return;
+    }
+    if (id == null) return;
+    if (message['type'] == 'closed') {
+      if (!(_closed?.isCompleted ?? true)) _closed!.complete();
+      return;
+    }
+    final completer = _pending.remove(id);
+    if (completer == null || completer.isCompleted) return;
+    if (message['type'] == 'error') {
+      completer.completeError(StateError(message['error'] as String));
+    } else {
+      completer.complete(message['result']);
+    }
+  }
+}
+
+class _WorkerInit {
+  const _WorkerInit(this.replyPort, this.rootToken, this.assetPath);
+  final SendPort replyPort;
+  final RootIsolateToken rootToken;
+  final String assetPath;
+}
+
+class _InferenceRequest {
+  const _InferenceRequest({
+    required this.input,
+    required this.width,
+    required this.height,
+  });
+  final Uint8List input;
+  final int width;
+  final int height;
+}
+
+@pragma('vm:entry-point')
+Future<void> _modelWorker(_WorkerInit init) async {
+  BackgroundIsolateBinaryMessenger.ensureInitialized(init.rootToken);
+  final commands = ReceivePort();
+  Interpreter? interpreter;
+  GpuDelegateV2? gpuDelegate;
+  try {
+    if (Platform.isAndroid) {
+      final gpuOptions = InterpreterOptions()..threads = 4;
+      try {
+        gpuDelegate = GpuDelegateV2();
+        gpuOptions.addDelegate(gpuDelegate);
+        interpreter = await Interpreter.fromAsset(
+          init.assetPath,
+          options: gpuOptions,
+        );
+        gpuOptions.delete();
+      } catch (_) {
+        gpuOptions.delete();
+        gpuDelegate?.delete();
+        gpuDelegate = null;
+      }
+    }
+    if (interpreter == null) {
+      final cpuOptions = InterpreterOptions()..threads = 4;
+      interpreter = await Interpreter.fromAsset(
+        init.assetPath,
+        options: cpuOptions,
+      );
+      cpuOptions.delete();
+    }
+    final input = interpreter.getInputTensor(0);
+    init.replyPort.send(commands.sendPort);
+    commands.listen((raw) async {
+      if (raw is! Map) return;
+      final type = raw['type'];
+      if (type == 'close') {
+        interpreter?.close();
+        gpuDelegate?.delete();
+        init.replyPort.send({'type': 'closed'});
+        commands.close();
+        return;
+      }
+      final id = raw['id'] as int;
+      try {
+        if (type == 'metadata') {
+          init.replyPort.send({
+            'type': 'result',
+            'id': id,
+            'result': {
+              'width': input.shape[2],
+              'height': input.shape[1],
+              'inputType': input.type.name,
+            },
+          });
+        } else {
+          final request = raw['payload'] as _InferenceRequest;
+          SegmentationOutput result;
+          try {
+            result = _inferClassMap(interpreter!, request.input);
+          } catch (_) {
+            if (gpuDelegate == null) rethrow;
+            interpreter!.close();
+            gpuDelegate!.delete();
+            gpuDelegate = null;
+            final cpuOptions = InterpreterOptions()..threads = 4;
+            interpreter = await Interpreter.fromAsset(
+              init.assetPath,
+              options: cpuOptions,
+            );
+            cpuOptions.delete();
+            result = _inferClassMap(interpreter!, request.input);
+          }
+          init.replyPort.send({'type': 'result', 'id': id, 'result': result});
+        }
+      } catch (error, stack) {
+        init.replyPort.send({
+          'type': 'error',
+          'id': id,
+          'error': '$error\n$stack',
+        });
+      }
+    });
+  } catch (error, stack) {
+    init.replyPort.send({'type': 'error', 'id': -1, 'error': '$error\n$stack'});
+  }
+}
+
+SegmentationOutput _inferClassMap(Interpreter interpreter, Uint8List input) {
+  final output = interpreter.getOutputTensor(0);
+  final shape = output.shape;
+  final isMap = shape.length == 3 || (shape.length == 4 && shape[3] == 1);
+  if (!isMap ||
+      (output.type != TensorType.uint8 && output.type != TensorType.int32)) {
+    throw StateError('Formato de saída não suportado: ${output.type} $shape');
+  }
+  final pixels = shape[1] * shape[2];
+  final Uint8List classMap;
+  if (output.type == TensorType.uint8) {
+    classMap = Uint8List(pixels);
+    interpreter.run(input, classMap);
+  } else {
+    final bytes = Uint8List(pixels * 4);
+    interpreter.run(input, bytes);
+    classMap = TfliteTensorCodec.int32ClassMap(bytes, pixels: pixels);
+  }
+  final maxClass = classMap.reduce((a, b) => a > b ? a : b);
+  return SegmentationOutput(
+    width: shape[2],
+    height: shape[1],
+    classes: maxClass + 1,
+    logits: Float32List(0),
+    classMap: classMap,
+  );
 }

@@ -15,7 +15,7 @@ void main() {
     expect(result.values, [1, 0]);
   });
 
-  test('smooths mask transitions over time', () {
+  test('stabilizes transitions without fractional edge bleed', () {
     final processor = MaskPostprocessor(wallClassIndex: 1, smoothing: 0.5);
     processor.process(
       Float32List.fromList([1, 0]),
@@ -29,7 +29,14 @@ void main() {
       height: 1,
       classes: 2,
     );
-    expect(result.values.single, 0.5);
+    expect(result.values.single, 1);
+    final next = processor.process(
+      Float32List.fromList([1, 0]),
+      width: 1,
+      height: 1,
+      classes: 2,
+    );
+    expect(next.values.single, 0);
   });
 
   test('selects wall from a quantized model class map', () {

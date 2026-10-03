@@ -5,17 +5,15 @@ import 'package:flutter/material.dart';
 
 import '../../domain/entities/wall_mask.dart';
 
-/// Re-renders the camera texture through a color tint and keeps only masked pixels.
+/// Draws a translucent paint-color layer only where the wall mask is opaque.
 class MaskPaintOverlay extends StatefulWidget {
   const MaskPaintOverlay({
-    required this.cameraPreview,
     required this.mask,
     required this.paintColor,
     required this.debugMask,
     super.key,
   });
 
-  final Widget cameraPreview;
   final WallMask mask;
   final Color paintColor;
   final bool debugMask;
@@ -84,40 +82,35 @@ class _MaskPaintOverlayState extends State<MaskPaintOverlay> {
     final maskImage = _maskImage;
     if (maskImage == null) return const SizedBox.shrink();
     return IgnorePointer(
-      child: Opacity(
-        opacity: widget.debugMask ? 0.85 : 0.72,
-        child: ShaderMask(
-          blendMode: BlendMode.dstIn,
-          shaderCallback: (bounds) => ui.ImageShader(
-            maskImage,
-            TileMode.clamp,
-            TileMode.clamp,
-            Float64List.fromList([
-              maskImage.width / bounds.width,
-              0,
-              0,
-              0,
-              0,
-              maskImage.height / bounds.height,
-              0,
-              0,
-              0,
-              0,
-              1,
-              0,
-              0,
-              0,
-              0,
-              1,
-            ]),
-          ),
-          child: ColorFiltered(
-            colorFilter: ColorFilter.mode(
-              widget.debugMask ? const Color(0xFF23EB5F) : widget.paintColor,
-              BlendMode.color,
-            ),
-            child: widget.cameraPreview,
-          ),
+      child: ShaderMask(
+        blendMode: BlendMode.dstIn,
+        shaderCallback: (bounds) => ui.ImageShader(
+          maskImage,
+          TileMode.clamp,
+          TileMode.clamp,
+          Float64List.fromList([
+            maskImage.width / bounds.width,
+            0,
+            0,
+            0,
+            0,
+            maskImage.height / bounds.height,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+          ]),
+        ),
+        child: ColoredBox(
+          color:
+              (widget.debugMask ? const Color(0xFF23EB5F) : widget.paintColor)
+                  .withValues(alpha: widget.debugMask ? 0.82 : 0.46),
         ),
       ),
     );
