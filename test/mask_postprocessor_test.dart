@@ -31,4 +31,16 @@ void main() {
     );
     expect(result.values.single, 0.5);
   });
+
+  test('selects wall from a quantized model class map', () {
+    final processor = MaskPostprocessor(wallClassIndex: 1);
+    final result = processor.process(
+      Float32List(0),
+      width: 3,
+      height: 1,
+      classes: 32,
+      classMap: Uint8List.fromList([0, 3, 1]),
+    );
+    expect(result.values, [0, 0, 1]);
+  });
 }

@@ -18,18 +18,30 @@ class MaskPostprocessor {
     required int width,
     required int height,
     required int classes,
+    Uint8List? classMap,
   }) {
+    if (classMap != null && classMap.length != width * height) {
+      throw ArgumentError('O mapa de classes não corresponde às dimensões.');
+    }
+    if (classMap == null && logits.length != width * height * classes) {
+      throw ArgumentError('Os logits não correspondem às dimensões e classes.');
+    }
     final mask = Float32List(width * height);
     for (var pixel = 0; pixel < width * height; pixel++) {
-      var bestClass = 0;
-      var bestScore = double.negativeInfinity;
-      for (var classIndex = 0; classIndex < classes; classIndex++) {
-        final score = logits[pixel * classes + classIndex];
-        if (score > bestScore) {
-          bestScore = score;
-          bestClass = classIndex;
-        }
-      }
+      final bestClass = classMap == null
+          ? () {
+              var best = 0;
+              var bestScore = double.negativeInfinity;
+              for (var classIndex = 0; classIndex < classes; classIndex++) {
+                final score = logits[pixel * classes + classIndex];
+                if (score > bestScore) {
+                  bestScore = score;
+                  best = classIndex;
+                }
+              }
+              return best;
+            }()
+          : classMap[pixel];
       final current = bestClass == wallClassIndex ? 1.0 : 0.0;
       mask[pixel] = _previous == null || _previous!.length != mask.length
           ? current

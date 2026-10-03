@@ -2,9 +2,13 @@
 
 Aplicativo Flutter para pré-visualizar cores de tinta em paredes com segmentação semântica local.
 
+## Objetivo do projeto
+
+Este projeto tem como base o aprendizado e a experimentação. Já trabalho com *machine vision* e quis explorar como adaptar esse conhecimento para um aplicativo de celular: segmentar paredes pela câmera e visualizar diferentes cores de tinta em tempo real, com processamento local no Android. O WallColor também serve para estudar os compromissos de levar visão computacional para dispositivos móveis, como latência, consumo de recursos, qualidade das bordas e integração entre Flutter, Android e TensorFlow Lite.
+
 ## Estado
 
-Fase 1 está implementada para um modelo ADE20K compatível: o app pede permissão, mostra a câmera, amostra frames YUV420, roda TFLite num isolate, suaviza a máscara, permite depurar a máscara e recolore só os pixels selecionados preservando a luminância com `BlendMode.color`. A paleta é lida de JSON e o processamento é limitado a 12 fps. **O modelo TFLite não está incluído**, então, sem instalá-lo localmente, o app mostra a câmera e informa que a segmentação não está disponível.
+Fase 1 inclui preview de câmera, amostragem YUV420, inferência TFLite em isolate, suavização temporal, depuração da máscara e recoloração preservando luminância. O modelo de teste espera RGB `uint8` em `[1,512,512,3]` e devolve IDs de classe `int32` em `[1,512,512]`. Consulte [assets/models/README.md](assets/models/README.md) para origem, licença, classes e instalação local do peso; o arquivo do modelo é ignorado pelo Git.
 
 ## Rodar
 
@@ -39,7 +43,7 @@ flutter build apk --debug
 
 ## Modelo ADE20K
 
-O app espera `assets/models/wall_segmentation.tflite`, com entrada RGB float32 NHWC em `[0,1]` e saída float32 NHWC `[1, altura, largura, classes]`. O índice de `wall` padrão é 0, seguindo a ordem ADE20K, mas confira o mapeamento específico do checkpoint. O carregador tenta GPU e volta para CPU. Esse arquivo não está incluído e a tela avisa que o modelo ainda não está configurado. Consulte [tools/README.md](tools/README.md) antes de selecionar/convertê-lo: confira licença, shapes, índice da classe `wall` e precisão após quantização.
+O modelo usado localmente é DeepLabV3 MobileNetV2 quantizado do MLPerf Mobile Models. Seu mapa tem a classe `wall` no índice 1 (índice 0 é `ignore`). O adaptador converte a entrada e decodifica a saída `int32` por pixel. O arquivo `.tflite` é excluído do Git; veja [assets/models/README.md](assets/models/README.md) para baixá-lo em uma cópia nova.
 
 Para configurar variáveis localmente, copie `.env.example` para `assets/config/.env`; esse caminho é ignorado pelo Git.
 

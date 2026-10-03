@@ -80,6 +80,7 @@ class WallSegmentationService {
         width: output.width,
         height: output.height,
         classes: output.classes,
+        classMap: output.classMap,
       );
     } catch (_) {
       _disabled = true;

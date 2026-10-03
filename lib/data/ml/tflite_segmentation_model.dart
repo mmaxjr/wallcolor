@@ -4,6 +4,7 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../../domain/entities/segmentation_output.dart';
 import 'segmentation_model.dart';
+import 'tflite_tensor_codec.dart';
 
 class TfliteSegmentationModel implements SegmentationModel {
   TfliteSegmentationModel({
@@ -16,6 +17,7 @@ class TfliteSegmentationModel implements SegmentationModel {
   int _inputWidth = 256;
   int _inputHeight = 256;
   Uint8List? _outputBuffer;
+  TensorType? _inputType;
 
   @override
   int get inputWidth => _inputWidth;
@@ -38,13 +40,16 @@ class TfliteSegmentationModel implements SegmentationModel {
         );
       }
       final inputShape = _interpreter!.getInputTensor(0).shape;
+      _inputType = _interpreter!.getInputTensor(0).type;
       if (inputShape.length != 4 || inputShape[0] != 1 || inputShape[3] != 3) {
         throw StateError(
           'Formato de entrada incompatível: $inputShape. Esperado [1, altura, largura, 3].',
         );
       }
-      if (_interpreter!.getInputTensor(0).type != TensorType.float32) {
-        throw StateError('O modelo precisa aceitar pixels RGB em float32.');
+      if (_inputType != TensorType.float32 && _inputType != TensorType.uint8) {
+        throw StateError(
+          'O modelo precisa aceitar pixels RGB float32 ou uint8.',
+        );
       }
       _inputHeight = inputShape[1];
       _inputWidth = inputShape[2];
@@ -80,20 +85,61 @@ class TfliteSegmentationModel implements SegmentationModel {
         'O frame de entrada não corresponde ao tensor do modelo.',
       );
     }
-    final input = Uint8List.view(
-      normalizedRgb.buffer,
-      normalizedRgb.offsetInBytes,
-      normalizedRgb.lengthInBytes,
-    );
-    final outputShape = interpreter.getOutputTensor(0).shape;
-    if (outputShape.length != 4 ||
-        outputShape[0] != 1 ||
-        interpreter.getOutputTensor(0).type != TensorType.float32) {
-      throw StateError(
-        'Formato de saída incompatível: $outputShape. Esperado [1, altura, largura, classes].',
+    final Uint8List input;
+    if (_inputType == TensorType.uint8) {
+      input = TfliteTensorCodec.normalizedRgbToUint8(normalizedRgb);
+    } else {
+      input = Uint8List.view(
+        normalizedRgb.buffer,
+        normalizedRgb.offsetInBytes,
+        normalizedRgb.lengthInBytes,
       );
     }
-    final classes = outputShape[3];
+    final outputShape = interpreter.getOutputTensor(0).shape;
+    final outputIsClassMap =
+        (outputShape.length == 3 && outputShape[0] == 1) ||
+        (outputShape.length == 4 && outputShape[0] == 1 && outputShape[3] == 1);
+    final hasBatchAndSpatialShape =
+        outputShape.length == 3 || outputShape.length == 4;
+    if (!hasBatchAndSpatialShape ||
+        outputShape[0] != 1 ||
+        outputShape[1] <= 0 ||
+        outputShape[2] <= 0) {
+      throw StateError(
+        'Formato de saída incompatível: $outputShape. Esperado [1, altura, largura] para mapa de classes ou [1, altura, largura, classes] para logits.',
+      );
+    }
+    final outputType = interpreter.getOutputTensor(0).type;
+    final classes = outputShape.length == 4 ? outputShape[3] : 1;
+    final isDiscreteMap =
+        outputIsClassMap &&
+        (outputType == TensorType.uint8 || outputType == TensorType.int32);
+    if (outputType != TensorType.float32 && !isDiscreteMap) {
+      throw StateError('Tipo de saída incompatível: $outputType $outputShape.');
+    }
+    if (isDiscreteMap) {
+      final mapLength = outputShape[1] * outputShape[2];
+      final Uint8List classMap;
+      if (outputType == TensorType.uint8) {
+        classMap = Uint8List(mapLength);
+        await worker.run(input, classMap.buffer);
+      } else {
+        final rawClassMap = Uint8List(mapLength * 4);
+        await worker.run(input, rawClassMap.buffer);
+        classMap = TfliteTensorCodec.int32ClassMap(
+          rawClassMap,
+          pixels: mapLength,
+        );
+      }
+      final maxClass = classMap.reduce((a, b) => a > b ? a : b);
+      return SegmentationOutput(
+        width: outputShape[2],
+        height: outputShape[1],
+        classes: maxClass + 1,
+        logits: Float32List(0),
+        classMap: classMap,
+      );
+    }
     final outputLength = outputShape.reduce((a, b) => a * b);
     if (classes < 2) {
       throw StateError(
@@ -106,7 +152,7 @@ class TfliteSegmentationModel implements SegmentationModel {
         ? outputBuffer
         : Uint8List(outputLength * 4);
     _outputBuffer = rawOutput;
-    await worker.run(input, rawOutput);
+    await worker.run(input, rawOutput.buffer);
     return SegmentationOutput(
       width: outputShape[2],
       height: outputShape[1],
@@ -126,5 +172,6 @@ class TfliteSegmentationModel implements SegmentationModel {
     _interpreter?.close();
     _interpreter = null;
     _outputBuffer = null;
+    _inputType = null;
   }
 }

@@ -85,7 +85,9 @@ class CameraSessionController extends Notifier<CameraSessionState> {
   final CameraService _cameraService = CameraService();
   final WallSegmentationService _segmentationService = WallSegmentationService(
     model: TfliteSegmentationModel(),
-    wallClassIndex: 0,
+    // The TensorFlow ADE20K checkpoint includes class 0 as `ignore`;
+    // `wall` is the next label in its model output map.
+    wallClassIndex: 1,
     targetInferenceFps: AppConfig.inferenceFps,
     smoothing: AppConfig.maskSmoothing,
   );
@@ -187,7 +189,7 @@ class CameraSessionController extends Notifier<CameraSessionState> {
       } catch (error) {
         if (!_disposed) {
           state = state.copyWith(
-            modelError: 'Modelo de parede indisponível. Adicione assets/models/wall_segmentation.tflite e gere o APK novamente.',
+            modelError: 'Modelo de parede indisponível: $error',
           );
         }
         debugPrint('WallColor model load failed: $error');
@@ -204,7 +206,6 @@ class CameraSessionController extends Notifier<CameraSessionState> {
       await _cameraService.startImageStream(
         (image) => _onCameraFrame(image, generation),
       );
-      if (!_disposed) state = state.copyWith(clearModelError: true);
     } catch (error) {
       if (!_disposed) {
         state = state.copyWith(
@@ -225,8 +226,7 @@ class CameraSessionController extends Notifier<CameraSessionState> {
     } catch (error) {
       if (!_disposed && generation == _sessionGeneration) {
         state = state.copyWith(
-          modelError:
-              'Falha ao segmentar a parede. Confira os tensores do modelo.',
+          modelError: 'Falha ao segmentar a parede: $error',
         );
         debugPrint('WallColor inference failed: $error');
         unawaited(_cameraService.stopImageStream());
