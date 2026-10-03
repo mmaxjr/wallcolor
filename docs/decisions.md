@@ -2,7 +2,7 @@
 
 ## Escopo deste primeiro corte
 
-O repositório usa Android como única plataforma e minSdk 24. O nome provisório escolhido é WallColor. Esta etapa entrega a base do app, solicitação de permissão, preview ao vivo e componentes independentes de máscara/paleta. A inferência integrada e a recoloração ainda não estão habilitadas porque o checkpoint compatível e seus tensores de entrada/saída não foram fornecidos nem validados.
+O repositório usa Android como única plataforma e minSdk 24. O nome escolhido é WallColor. A tela coordena estado via Riverpod; os serviços de câmera e ML ficam em camadas próprias. Sem o arquivo TFLite local não é possível testar a inferência de ponta a ponta.
 
 ## Modelo
 
@@ -10,15 +10,15 @@ ADE20K fornece uma classe semântica para parede. Mantemos uma interface `Segmen
 
 ## Isolate e taxa de frames
 
-`IsolateInterpreter` executa inferência fora do isolate de UI. A integração da câmera deve adotar latest-frame-wins, sem fila crescente, e limitar a inferência a 10–15 fps. Não há benchmark nem compromisso de 30 fps nesta etapa.
+`IsolateInterpreter` executa inferência fora do isolate de UI. A política latest-frame-wins descarta frames enquanto o modelo trabalha, sem fila crescente. A taxa padrão é 12 fps e pode ser ajustada em `assets/config/.env`. O preview da câmera continua sendo renderizado pelo Flutter. Não há benchmark nem compromisso de 30 fps sem medição em aparelhos.
 
 ## Composição
 
-O shader preserva a luminância aproximada do pixel da câmera e mistura pela máscara e opacidade da tinta. A máscara suavizada deve ser amostrada no mesmo espaço UV do preview. O shader é apenas um contrato inicial: seu binding de textura e a sincronização com os frames ainda precisam ser conectados e medidos num dispositivo real.
+O overlay usa `ColorFilter.mode` com `BlendMode.color` para trocar matiz/saturação sem substituir a luminância. Uma imagem de máscara alfa limita o efeito à classe parede; a camada mantém a textura e as sombras da prévia abaixo. `shaders/wall_recolor.frag` fica como alternativa futura se for necessário controlar a composição com mais precisão.
 
 ## Pré-processamento
 
-Não moveremos YUV para RGB em Dart até existir uma medição que demonstre gargalo. O fluxo da câmera usa YUV420 e resolução média; reaproveitamento de buffers e eventual implementação Kotlin via platform channel ficam para o passo de integração/benchmark.
+O fluxo da câmera usa YUV420 e amostra diretamente na resolução do tensor, reaproveitando o buffer RGB entre inferências. Se isso virar gargalo, mova a conversão para Kotlin via platform channel.
 
 ## Configuração e privacidade
 

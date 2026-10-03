@@ -4,7 +4,7 @@ Aplicativo Flutter para pré-visualizar cores de tinta em paredes com segmentaç
 
 ## Estado
 
-Base inicial da Fase 1: projeto Android (minSdk 24), permissão da câmera com mensagens para negação e bloqueio, preview ao vivo e paleta demonstrativa. A interface de modelo TFLite, execução em isolate, pós-processamento da máscara e shader foram iniciados, mas **a inferência ainda não está ligada ao stream e a recoloração ainda não está conectada ao preview**. Para habilitar isso é preciso selecionar, converter e validar um checkpoint ADE20K licenciado.
+Fase 1 está implementada para um modelo ADE20K compatível: o app pede permissão, mostra a câmera, amostra frames YUV420, roda TFLite num isolate, suaviza a máscara, permite depurar a máscara e recolore só os pixels selecionados preservando a luminância com `BlendMode.color`. A paleta é lida de JSON e o processamento é limitado a 12 fps. **O modelo TFLite não está incluído**, então, sem instalá-lo localmente, o app mostra a câmera e informa que a segmentação não está disponível.
 
 ## Rodar
 
@@ -34,14 +34,17 @@ flutter build apk --debug
 - `assets/palettes/starter.json`: cores iniciais de demonstração.
 - `shaders/wall_recolor.frag`: base para mistura da tinta preservando luminância.
 - `assets/models/`: destino local para o modelo validado (pesos ignorados pelo Git).
+- `assets/config/default.env`: valores padrão de taxa de inferência e suavização; crie `assets/config/.env` para sobrepor localmente.
 - `docs/decisions.md` e `docs/benchmarks.md`: decisões e espaço para métricas medidas.
 
 ## Modelo ADE20K
 
-O app espera `assets/models/wall_segmentation.tflite`, com entrada RGB float32 NHWC e saída de logits por pixel. Esse arquivo não está incluído e a tela avisa que o modelo ainda não está configurado. Consulte [tools/README.md](tools/README.md) antes de selecionar/convertê-lo: confira licença, shapes, índice da classe `wall` e precisão após quantização.
+O app espera `assets/models/wall_segmentation.tflite`, com entrada RGB float32 NHWC em `[0,1]` e saída float32 NHWC `[1, altura, largura, classes]`. O índice de `wall` padrão é 0, seguindo a ordem ADE20K, mas confira o mapeamento específico do checkpoint. O carregador tenta GPU e volta para CPU. Esse arquivo não está incluído e a tela avisa que o modelo ainda não está configurado. Consulte [tools/README.md](tools/README.md) antes de selecionar/convertê-lo: confira licença, shapes, índice da classe `wall` e precisão após quantização.
+
+Para configurar variáveis localmente, copie `.env.example` para `assets/config/.env`; esse caminho é ignorado pelo Git.
 
 ## Desempenho e limitações
 
-Não foram medidos FPS ou latência ainda. O alvo do projeto é inferência a 10–15 fps e preview a 30 fps em aparelho intermediário, mas isso precisa ser validado em dispositivo físico. O primeiro build evita converter YUV em Dart antes de existir medição; se virar gargalo, avalie pré-processamento Kotlin por platform channel. Bordas de teto, móveis e iluminação ruim também exigirão ajuste do modelo e da máscara.
+Não foram medidos FPS ou latência ainda. O alvo do projeto é inferência a 10–15 fps e preview a 30 fps em aparelho intermediário, mas isso precisa ser validado em dispositivo físico. O pré-processamento amostra YUV420 diretamente na resolução de entrada para evitar um frame RGB intermediário; se isso virar gargalo, avalie Kotlin por platform channel. Bordas de teto, móveis e iluminação ruim também exigirão ajuste do modelo e da máscara.
 
 O processamento de imagem planejado é local, sem backend. Configurações locais podem ser registradas em `.env` usando `.env.example` como referência; `.env` e pesos do modelo são ignorados pelo Git.

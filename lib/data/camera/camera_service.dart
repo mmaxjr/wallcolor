@@ -24,13 +24,45 @@ class CameraService {
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
     _controller = controller;
-    await controller.initialize();
+    try {
+      await controller.initialize();
+    } catch (_) {
+      _controller = null;
+      await controller.dispose();
+      rethrow;
+    }
     return controller;
   }
 
   Future<void> dispose() async {
     final controller = _controller;
     _controller = null;
+    if (controller?.value.isStreamingImages ?? false) {
+      try {
+        await controller!.stopImageStream();
+      } catch (_) {
+        // The platform may already have stopped the stream during app pause.
+      }
+    }
     await controller?.dispose();
+  }
+
+  Future<void> startImageStream(
+    void Function(CameraImage image) onFrame,
+  ) async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      throw StateError('A câmera ainda não foi inicializada.');
+    }
+    if (!controller.value.isStreamingImages) {
+      await controller.startImageStream(onFrame);
+    }
+  }
+
+  Future<void> stopImageStream() async {
+    final controller = _controller;
+    if (controller?.value.isStreamingImages ?? false) {
+      await controller!.stopImageStream();
+    }
   }
 }
